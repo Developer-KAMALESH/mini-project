@@ -1,0 +1,1102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Group Management App</title>
+    <script type="module">
+        // Import Firebase SDK
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.3.1/firebase-app.js";
+        import { 
+            getFirestore, 
+            collection, 
+            doc, 
+            setDoc, 
+            getDoc,
+            onSnapshot, 
+            updateDoc, 
+            arrayUnion, 
+            arrayRemove,
+            deleteDoc,
+            query,
+            where,
+            addDoc,
+            orderBy,
+            limit,
+            serverTimestamp
+        } from "https://www.gstatic.com/firebasejs/11.3.1/firebase-firestore.js";
+        import { 
+            getAuth, 
+            createUserWithEmailAndPassword, 
+            signInWithEmailAndPassword, 
+            signOut, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.3.1/firebase-auth.js";
+
+        // Firebase Configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyAZHr2EwjCeWMg-QG99bA2EHQ7IsFZyu5o",
+            authDomain: "group-management-app-e1713.firebaseapp.com",
+            projectId: "group-management-app-e1713",
+            storageBucket: "group-management-app-e1713.appspot.com",
+            messagingSenderId: "299127103739",
+            appId: "1:299127103739:web:8424742a882db7f9f4505e",
+            measurementId: "G-TY1ETSNE14"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        // Global state
+        let currentUser = null;
+        let chatListeners = {}; // Store chat listeners to unsubscribe when needed
+
+        // Show status messages
+        function showStatus(message, isError = false) {
+            const status = document.getElementById("status");
+            status.textContent = message;
+            status.className = isError ? "error" : "success";
+            status.style.display = "block";
+            setTimeout(() => {
+                status.style.display = "none";
+            }, 3000);
+        }
+
+        // Validate input
+        function validateInput(input, type = "input") {
+            const trimmed = input.trim();
+            if (!trimmed) {
+                throw new Error(`Please enter a valid ${type}`);
+            }
+            if (trimmed.length < 2 && type !== "email" && type !== "password") {
+                throw new Error(`${type} must be at least 2 characters long`);
+            }
+            if (trimmed.length > 30 && type !== "email" && type !== "password") {
+                throw new Error(`${type} must be less than 30 characters`);
+            }
+            if (type === "email" && !trimmed.includes('@')) {
+                throw new Error('Please enter a valid email address');
+            }
+            if (type === "password" && trimmed.length < 6) {
+                throw new Error('Password must be at least 6 characters long');
+            }
+            return trimmed;
+        }
+
+        // AUTHENTICATION FUNCTIONS
+
+        // Sign Up
+        window.signUp = async function() {
+            const emailInput = document.getElementById("signupEmail");
+            const passwordInput = document.getElementById("signupPassword");
+            const nameInput = document.getElementById("signupName");
+            
+            try {
+                const email = validateInput(emailInput.value, "email");
+                const password = validateInput(passwordInput.value, "password");
+                const name = validateInput(nameInput.value, "name");
+                
+                // Create user account
+                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                const user = userCredential.user;
+                
+                // Create user profile in Firestore
+                await setDoc(doc(db, "users", user.uid), {
+                    email: email,
+                    name: name,
+                    createdAt: new Date().toISOString()
+                });
+                
+                showStatus(`Account created successfully! Welcome ${name}`);
+                
+                // Clear inputs
+                emailInput.value = "";
+                passwordInput.value = "";
+                nameInput.value = "";
+                
+                // Navigate to main app
+                showApp();
+            } catch (error) {
+                showStatus(error.message, true);
+            }
+        }
+
+        // Sign In
+        window.signIn = async function() {
+            const emailInput = document.getElementById("loginEmail");
+            const passwordInput = document.getElementById("loginPassword");
+            
+            try {
+                const email = validateInput(emailInput.value, "email");
+                const password = validateInput(passwordInput.value, "password");
+                
+                await signInWithEmailAndPassword(auth, email, password);
+                
+                // Clear inputs
+                emailInput.value = "";
+                passwordInput.value = "";
+                
+                showStatus("Logged in successfully!");
+            } catch (error) {
+                showStatus(error.message, true);
+            }
+        }
+
+        // Sign Out
+        window.signOut = async function() {
+            try {
+                await signOut(auth);
+                showStatus("Logged out successfully");
+                showAuth();
+            } catch (error) {
+                showStatus(error.message, true);
+            }
+        }
+
+        // GROUP MANAGEMENT FUNCTIONS
+
+        // Create Group
+        window.createGroup = async function() {
+            if (!currentUser) return showStatus("You must be logged in", true);
+            
+            const input = document.getElementById("groupName");
+            try {
+                const groupName = validateInput(input.value, "group name");
+                const timestamp = new Date().toISOString();
+                
+                // Create unique ID for the group
+                const groupId = Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+                
+                await setDoc(doc(db, "groups", groupId), {
+                    name: groupName,
+                    ownerId: currentUser.uid,
+                    ownerEmail: currentUser.email,
+                    ownerName: await getUserName(currentUser.uid),
+                    members: [],
+                    admins: [currentUser.uid], // Owner is automatically an admin
+                    createdAt: timestamp,
+                    updatedAt: timestamp
+                });
+                
+                input.value = "";
+                showStatus(`Group "${groupName}" created successfully`);
+            } catch (error) {
+                showStatus(error.message, true);
+            }
+        }
+
+        // Add Member
+        window.addMember = async function(groupId, groupData) {
+            if (!currentUser) return showStatus("You must be logged in", true);
+            if (!groupData.admins.includes(currentUser.uid)) {
+                return showStatus("Only group admins can add members", true);
+            }
+            
+            try {
+                const memberEmail = validateInput(prompt(`Enter member email for group "${groupData.name}":`), "email");
+                if (!memberEmail) return;
+                
+                // Check if user exists
+                const userQuery = query(collection(db, "users"), where("email", "==", memberEmail));
+                const userSnapshot = await onSnapshot(userQuery, async (snapshot) => {
+                    userSnapshot(); // Unsubscribe after first execution
+                    
+                    if (snapshot.empty) {
+                        return showStatus("No user found with this email", true);
+                    }
+                    
+                    const userData = snapshot.docs[0].data();
+                    const userId = snapshot.docs[0].id;
+                    
+                    // Check if already a member
+                    if (groupData.members.includes(memberEmail)) {
+                        return showStatus(`${memberEmail} is already a member of this group`, true);
+                    }
+                    
+                    // Add member
+                    const groupRef = doc(db, "groups", groupId);
+                    await updateDoc(groupRef, {
+                        members: arrayUnion(memberEmail),
+                        updatedAt: new Date().toISOString()
+                    });
+                    
+                    showStatus(`Added ${memberEmail} to "${groupData.name}"`);
+                });
+            } catch (error) {
+                showStatus(error.message, true);
+            }
+        }
+
+        // Make Admin
+        window.makeAdmin = async function(groupId, groupData, memberEmail) {
+            if (!currentUser) return showStatus("You must be logged in", true);
+            if (groupData.ownerId !== currentUser.uid) {
+                return showStatus("Only the group owner can assign admins", true);
+            }
+            
+            try {
+                // Get userId from email
+                const userQuery = query(collection(db, "users"), where("email", "==", memberEmail));
+                const userSnapshot = await onSnapshot(userQuery, async (snapshot) => {
+                    userSnapshot(); // Unsubscribe after first execution
+                    
+                    if (snapshot.empty) {
+                        return showStatus("User not found", true);
+                    }
+                    
+                    const userId = snapshot.docs[0].id;
+                    
+                    // Check if already an admin
+                    if (groupData.admins.includes(userId)) {
+                        return showStatus(`${memberEmail} is already an admin`, true);
+                    }
+                    
+                    // Make admin
+                    const groupRef = doc(db, "groups", groupId);
+                    await updateDoc(groupRef, {
+                        admins: arrayUnion(userId),
+                        updatedAt: new Date().toISOString()
+                    });
+                    
+                    showStatus(`${memberEmail} is now an admin of "${groupData.name}"`);
+                });
+            } catch (error) {
+                showStatus(error.message, true);
+            }
+        }
+
+        // Remove Member
+        window.removeMember = async function(groupId, groupData, memberEmail) {
+            if (!currentUser) return showStatus("You must be logged in", true);
+            if (!groupData.admins.includes(currentUser.uid)) {
+                return showStatus("Only group admins can remove members", true);
+            }
+            
+            if (!confirm(`Remove ${memberEmail} from ${groupData.name}?`)) return;
+            
+            try {
+                // Get userId from email
+                const userQuery = query(collection(db, "users"), where("email", "==", memberEmail));
+                const userSnapshot = await onSnapshot(userQuery, async (snapshot) => {
+                    userSnapshot(); // Unsubscribe after first execution
+                    
+                    // Remove from admin if they are an admin
+                    if (!snapshot.empty) {
+                        const userId = snapshot.docs[0].id;
+                        if (groupData.admins.includes(userId)) {
+                            await updateDoc(doc(db, "groups", groupId), {
+                                admins: arrayRemove(userId)
+                            });
+                        }
+                    }
+                    
+                    // Remove from members
+                    await updateDoc(doc(db, "groups", groupId), {
+                        members: arrayRemove(memberEmail),
+                        updatedAt: new Date().toISOString()
+                    });
+                    
+                    showStatus(`Removed ${memberEmail} from "${groupData.name}"`);
+                });
+            } catch (error) {
+                showStatus(error.message, true);
+            }
+        }
+
+        // Delete Group
+        window.deleteGroup = async function(groupId, groupName) {
+            if (!currentUser) return showStatus("You must be logged in", true);
+            
+            // Check if user is the owner
+            const groupDoc = await getDoc(doc(db, "groups", groupId));
+            if (!groupDoc.exists()) return;
+            
+            const groupData = groupDoc.data();
+            if (groupData.ownerId !== currentUser.uid) {
+                return showStatus("Only the group owner can delete this group", true);
+            }
+            
+            if (!confirm(`Delete group "${groupName}"? This cannot be undone.`)) return;
+            
+            try {
+                await deleteDoc(doc(db, "groups", groupId));
+                showStatus(`Group "${groupName}" deleted`);
+            } catch (error) {
+                showStatus(error.message, true);
+            }
+        }
+
+        // CHAT FUNCTIONS
+
+        // Send Chat Message
+        window.sendMessage = async function(groupId) {
+            if (!currentUser) return showStatus("You must be logged in", true);
+            
+            const messageInput = document.getElementById(`chat-input-${groupId}`);
+            const message = messageInput.value.trim();
+            
+            if (!message) return;
+            
+            try {
+                // Get user name
+                const userName = await getUserName(currentUser.uid);
+                
+                // Create message document
+                await addDoc(collection(db, "groups", groupId, "messages"), {
+                    text: message,
+                    userId: currentUser.uid,
+                    userEmail: currentUser.email,
+                    userName: userName,
+                    timestamp: serverTimestamp()
+                });
+                
+                // Clear input
+                messageInput.value = "";
+            } catch (error) {
+                showStatus("Failed to send message: " + error.message, true);
+            }
+        }
+
+        // Toggle Chat Display
+        window.toggleChat = function(groupId) {
+            const chatContainer = document.getElementById(`chat-container-${groupId}`);
+            const chatToggle = document.getElementById(`chat-toggle-${groupId}`);
+            
+            if (chatContainer.style.display === "none") {
+                chatContainer.style.display = "block";
+                chatToggle.textContent = "Hide Chat";
+                loadGroupChat(groupId);
+            } else {
+                chatContainer.style.display = "none";
+                chatToggle.textContent = "Show Chat";
+                // Unsubscribe from messages listener when hiding
+                if (chatListeners[groupId]) {
+                    chatListeners[groupId]();
+                    delete chatListeners[groupId];
+                }
+            }
+        }
+
+        // Load Group Chat
+        function loadGroupChat(groupId) {
+            const chatMessages = document.getElementById(`chat-messages-${groupId}`);
+            
+            // Unsubscribe from previous listener if exists
+            if (chatListeners[groupId]) {
+                chatListeners[groupId]();
+            }
+            
+            // Clear previous messages
+            chatMessages.innerHTML = "<div class='loading-messages'>Loading messages...</div>";
+            
+            // Setup query for messages, ordered by timestamp
+            const messagesQuery = query(
+                collection(db, "groups", groupId, "messages"),
+                orderBy("timestamp", "desc"),
+                limit(50)
+            );
+            
+            // Subscribe to messages
+            const unsubscribe = onSnapshot(messagesQuery, (snapshot) => {
+                chatMessages.innerHTML = "";
+                
+                if (snapshot.empty) {
+                    chatMessages.innerHTML = "<div class='no-messages'>No messages yet. Start the conversation!</div>";
+                    return;
+                }
+                
+                // Display messages in reverse order (newest at bottom)
+                const messages = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                messages.reverse().forEach(message => {
+                    const messageEl = document.createElement("div");
+                    messageEl.className = message.userId === currentUser.uid ? "message own-message" : "message";
+                    
+                    const messageTime = message.timestamp ? new Date(message.timestamp.toDate()).toLocaleString() : "Just now";
+                    
+                    messageEl.innerHTML = `
+                        <div class="message-header">
+                            <strong>${message.userName}</strong>
+                            <span class="message-time">${messageTime}</span>
+                        </div>
+                        <div class="message-content">${message.text}</div>
+                    `;
+                    
+                    chatMessages.appendChild(messageEl);
+                });
+                
+                // Scroll to bottom of chat
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            });
+            
+            // Store listener to unsubscribe later
+            chatListeners[groupId] = unsubscribe;
+            
+            // Handle input field enter key
+            const chatInput = document.getElementById(`chat-input-${groupId}`);
+            chatInput.addEventListener("keypress", function(e) {
+                if (e.key === "Enter") {
+                    sendMessage(groupId);
+                }
+            });
+        }
+
+        // HELPER FUNCTIONS
+
+        // Get User Name
+        async function getUserName(userId) {
+            try {
+                const userDoc = await getDoc(doc(db, "users", userId));
+                if (userDoc.exists()) {
+                    return userDoc.data().name;
+                }
+                return "Unknown User";
+            } catch (error) {
+                console.error("Error getting user name:", error);
+                return "Unknown User";
+            }
+        }
+
+        // Format Date
+        function formatDate(isoString) {
+            return new Date(isoString).toLocaleString();
+        }
+
+        // UI MANAGEMENT
+
+        // Show Auth Pages
+        function showAuth() {
+            document.getElementById("authSection").style.display = "block";
+            document.getElementById("appSection").style.display = "none";
+            document.getElementById("loginTab").style.display = "block";
+            document.getElementById("signupTab").style.display = "none";
+        }
+
+        // Show App
+        function showApp() {
+            document.getElementById("authSection").style.display = "none";
+            document.getElementById("appSection").style.display = "block";
+            renderGroups();
+        }
+
+        // Show Login Tab
+        window.showLoginTab = function() {
+            document.getElementById("loginTab").style.display = "block";
+            document.getElementById("signupTab").style.display = "none";
+        }
+
+        // Show Signup Tab
+        window.showSignupTab = function() {
+            document.getElementById("loginTab").style.display = "none";
+            document.getElementById("signupTab").style.display = "block";
+        }
+
+        // Render Groups
+        function renderGroups() {
+            if (!currentUser) return;
+            
+            const groupList = document.getElementById("groupList");
+            const userEmail = currentUser.email;
+            
+            // Get all groups where user is owner or member
+            const groupsQuery = query(
+                collection(db, "groups"), 
+                where("members", "array-contains", userEmail)
+            );
+            
+            const userGroupsListener = onSnapshot(groupsQuery, (snapshot) => {
+                groupList.innerHTML = "";
+                
+                // Get user-owned groups
+                const ownerQuery = query(
+                    collection(db, "groups"), 
+                    where("ownerId", "==", currentUser.uid)
+                );
+                
+                const ownerGroupsListener = onSnapshot(ownerQuery, (ownerSnapshot) => {
+                    // Combine the results
+                    const allGroups = [...snapshot.docs, ...ownerSnapshot.docs];
+                    // Remove duplicates
+                    const uniqueGroups = allGroups.filter((group, index, self) => 
+                        index === self.findIndex((g) => g.id === group.id)
+                    );
+                    
+                    if (uniqueGroups.length === 0) {
+                        groupList.innerHTML = "<li class='no-groups'>No groups found. Create a new group or ask to be added to one.</li>";
+                        return;
+                    }
+                    
+                    uniqueGroups.forEach(async groupDoc => {
+                        const groupId = groupDoc.id;
+                        const groupData = groupDoc.data();
+                        const isOwner = groupData.ownerId === currentUser.uid;
+                        const isAdmin = groupData.admins.includes(currentUser.uid);
+                        
+                        const li = document.createElement("li");
+                        li.className = "group-item";
+                        li.innerHTML = `
+                            <div class="group-header">
+                                <strong>${groupData.name}</strong>
+                                <div class="group-actions">
+                                    ${isAdmin ? `<button onclick="addMember('${groupId}', ${JSON.stringify(groupData).replace(/"/g, '&quot;')})" class="btn-add">Add Member</button>` : ''}
+                                    ${isOwner ? `<button onclick="deleteGroup('${groupId}', '${groupData.name}')" class="btn-delete">Delete Group</button>` : ''}
+                                </div>
+                            </div>
+                            <div class="group-info">
+                                <small>Owner: ${groupData.ownerName} (${groupData.ownerEmail})</small>
+                                <small>Created: ${formatDate(groupData.createdAt)}</small>
+                                <small>Updated: ${formatDate(groupData.updatedAt)}</small>
+                            </div>
+                            <div class="members-container">
+                                <h4>Members</h4>
+                                <div class="members-list">
+                                    ${groupData.members.length ? 
+                                        groupData.members.map(member => `
+                                            <div class="member-item">
+                                                <span>${member}</span>
+                                                ${isAdmin ? `
+                                                    <div class="member-actions">
+                                                        ${isOwner ? `<button onclick="makeAdmin('${groupId}', ${JSON.stringify(groupData).replace(/"/g, '&quot;')}, '${member}')" class="btn-admin">Make Admin</button>` : ''}
+                                                        <button onclick="removeMember('${groupId}', ${JSON.stringify(groupData).replace(/"/g, '&quot;')}, '${member}')" class="btn-remove">Remove</button>
+                                                    </div>
+                                                ` : ''}
+                                            </div>
+                                        `).join("") : 
+                                        '<div class="no-members">No members yet</div>'
+                                    }
+                                </div>
+                            </div>
+                            
+                            <!-- Chat Toggle Button -->
+                            <div class="chat-toggle-container">
+                                <button id="chat-toggle-${groupId}" onclick="toggleChat('${groupId}')" class="btn-chat-toggle">Show Chat</button>
+                            </div>
+                            
+                            <!-- Chat Container -->
+                            <div id="chat-container-${groupId}" class="chat-container" style="display: none;">
+                                <div class="chat-header">
+                                    <h4>Group Chat</h4>
+                                </div>
+                                <div id="chat-messages-${groupId}" class="chat-messages">
+                                    <div class="loading-messages">Loading messages...</div>
+                                </div>
+                                <div class="chat-input-container">
+                                    <input id="chat-input-${groupId}" type="text" placeholder="Type a message..." class="chat-input">
+                                    <button onclick="sendMessage('${groupId}')" class="btn-send">Send</button>
+                                </div>
+                            </div>
+                        `;
+                        groupList.appendChild(li);
+                    });
+                });
+            });
+        }
+
+        // Initialize app
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                // User is signed in
+                currentUser = user;
+                document.getElementById("userEmail").textContent = user.email;
+                showApp();
+            } else {
+                // User is signed out
+                currentUser = null;
+                showAuth();
+            }
+        });
+
+        // Event Listeners
+        document.addEventListener('DOMContentLoaded', () => {
+            // Handle enter key for inputs
+            document.getElementById("groupName").addEventListener("keypress", (e) => {
+                if (e.key === "Enter") createGroup();
+            });
+            
+            document.getElementById("loginEmail").addEventListener("keypress", (e) => {
+                if (e.key === "Enter") document.getElementById("loginPassword").focus();
+            });
+            
+            document.getElementById("loginPassword").addEventListener("keypress", (e) => {
+                if (e.key === "Enter") signIn();
+            });
+            
+            document.getElementById("signupEmail").addEventListener("keypress", (e) => {
+                if (e.key === "Enter") document.getElementById("signupPassword").focus();
+            });
+            
+            document.getElementById("signupPassword").addEventListener("keypress", (e) => {
+                if (e.key === "Enter") document.getElementById("signupName").focus();
+            });
+            
+            document.getElementById("signupName").addEventListener("keypress", (e) => {
+                if (e.key === "Enter") signUp();
+            });
+        });
+    </script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #f5f5f5;
+        }
+
+        h2, h3, h4 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+
+        /* Form styles */
+        .form-container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        .form-tabs {
+            display: flex;
+            margin-bottom: 20px;
+        }
+
+        .form-tab {
+            padding: 10px 20px;
+            background-color: #f1f1f1;
+            cursor: pointer;
+            border-radius: 4px 4px 0 0;
+            margin-right: 5px;
+        }
+
+        .form-tab.active {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        .tab-content {
+            padding: 20px;
+            background-color: white;
+            border-radius: 0 4px 4px 4px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+
+        /* Input styles */
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        input {
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+            width: 100%;
+            transition: border-color 0.3s;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #4CAF50;
+            box-shadow: 0 0 5px rgba(76, 175, 80, 0.5);
+        }
+
+        /* Button styles */
+        button {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            font-weight: 500;
+        }
+
+        .btn-create {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        .btn-create:hover {
+            background-color: #3e8e41;
+        }
+
+        .btn-add {
+            background-color: #2196F3;
+            color: white;
+            font-size: 14px;
+        }
+
+        .btn-add:hover {
+            background-color: #0b7dda;
+        }
+
+        .btn-delete {
+            background-color: #f44336;
+            color: white;
+            font-size: 14px;
+        }
+
+        .btn-delete:hover {
+            background-color: #d32f2f;
+        }
+
+        .btn-remove {
+            background-color: #ff5722;
+            color: white;
+            font-size: 12px;
+            padding: 4px 8px;
+        }
+
+        .btn-remove:hover {
+            background-color: #e64a19;
+        }
+
+        .btn-admin {
+            background-color: #9c27b0;
+            color: white;
+            font-size: 12px;
+            padding: 4px 8px;
+            margin-right: 5px;
+        }
+
+        .btn-admin:hover {
+            background-color: #7b1fa2;
+        }
+
+        .btn-auth {
+            background-color: #4CAF50;
+            color: white;
+            width: 100%;
+        }
+
+        .btn-auth:hover {
+            background-color: #3e8e41;
+        }
+
+        .btn-link {
+            background: none;
+            color: #2196F3;
+            text-decoration: underline;
+            padding: 0;
+        }
+
+        .btn-logout {
+            background-color: #f44336;
+            color: white;
+            padding: 5px 10px;
+            font-size: 14px;
+        }
+
+        /* Chat specific styles */
+        .chat-toggle-container {
+            margin-top: 15px;
+            text-align: center;
+        }
+
+        .btn-chat-toggle {
+            background-color: #3f51b5;
+            color: white;
+            padding: 8px 16px;
+            width: 100%;
+        }
+
+        .btn-chat-toggle:hover {
+            background-color: #303f9f;
+        }
+
+        .chat-container {
+            margin-top: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: white;
+        }
+
+        .chat-header {
+            background-color: #3f51b5;
+            color: white;
+            padding: 10px;
+            border-radius: 4px 4px 0 0;
+        }
+
+        .chat-header h4 {
+            margin: 0;
+            color: white;
+        }
+
+        .chat-messages {
+            height: 300px;
+            overflow-y: auto;
+            padding: 10px;
+            background-color: #f9f9f9;
+        }
+
+        .message {
+            margin-bottom: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #e1f5fe;
+            max-width: 80%;
+        }
+
+        .own-message {
+            background-color: #e8f5e9;
+            margin-left: auto;
+            border-left: 4px solid #4CAF50;
+        }
+
+        .message-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 12px;
+        }
+
+        .message-time {
+            color: #666;
+        }
+
+        .message-content {
+            word-break: break-word;
+        }
+
+        .chat-input-container {
+            display: flex;
+            padding: 10px;
+            border-top: 1px solid #ddd;
+        }
+
+        .chat-input {
+            flex-grow: 1;
+            margin-right: 10px;
+        }
+
+        .btn-send {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        .btn-send:hover {
+            background-color: #3e8e41;
+        }
+
+        .loading-messages, .no-messages {
+            text-align: center;
+            color: #666;
+            padding: 20px;
+            font-style: italic;
+        }
+
+        /* Group styles */
+        .group-item {
+            background: white;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .group-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .group-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .group-info {
+            display: flex;
+            flex-direction: column;
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 15px;
+        }
+
+        .members-container {
+            background-color: #f9f9f9;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+
+        .members-list {
+            margin-top: 10px;
+        }
+
+        .member-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .member-item:last-child {
+            border-bottom: none;
+        }
+
+        .member-actions {
+            display: flex;
+            gap: 5px;
+        }
+
+        .no-groups, .no-members {
+            color: #666;
+            font-style: italic;
+            text-align: center;
+            padding: 10px;
+        }
+
+        /* Status messages */
+        #status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 15px 0;
+            display: none;
+        }
+
+        .success {
+            background-color: #dff0d8;
+            color: #3c763d;
+            border: 1px solid #d6e9c6;
+        }
+
+        .error {
+            background-color: #f2dede;
+            color: #a94442;
+            border: 1px solid #ebccd1;
+        }
+
+        /* User info */
+        .user-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #f1f1f1;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+
+        /* Responsive */
+        @media (max-width: 600px) {
+            .group-header, .member-item {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .group-actions, .member-actions {
+                margin-top: 10px;
+                width: 100%;
+                display: flex;
+                justify-content: space-between;
+            }
+            
+            input, button {
+                width: 100%;
+                margin-bottom: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h2>Group Management App</h2>
+
+    <!-- Status Display -->
+    <div id="status"></div>
+
+    <!-- Authentication Section -->
+    <section id="authSection">
+        <div class="form-tabs">
+            <div class="form-tab active" onclick="showLoginTab()">Login</div>
+            <div class="form-tab" onclick="showSignupTab()">Sign Up</div>
+        </div>
+
+        <!-- Login Form -->
+        <div id="loginTab" class="tab-content">
+            <div class="input-group">
+                <label for="loginEmail">Email:</label>
+                <input type="email" id="loginEmail" placeholder="Enter your email">
+            </div>
+            <div class="input-group">
+                <label for="loginPassword">Password:</label>
+                <input type="password" id="loginPassword" placeholder="Enter your password">
+            </div>
+            <button class="btn-auth" onclick="signIn()">Login</button>
+            <div style="text-align: center; margin-top: 20px;">
+                <p>Don't have an account? <button class="btn-link" onclick="showSignupTab()">Sign up</button></p>
+            </div>
+        </div>
+
+        <!-- Signup Form -->
+        <div id="signupTab" class="tab-content" style="display: none;">
+            <div class="input-group">
+                <label for="signupEmail">Email:</label>
+                <input type="email" id="signupEmail" placeholder="Enter your email">
+            </div>
+            <div class="input-group">
+                <label for="signupPassword">Password:</label>
+                <input type="password" id="signupPassword" placeholder="Enter your password (min 6 characters)">
+            </div>
+            <div class="input-group">
+                <label for="signupName">Name:</label>
+                <input type="text" id="signupName" placeholder="Enter your name">
+            </div>
+            <button class="btn-auth" onclick="signUp()">Sign Up</button>
+            <div style="text-align: center; margin-top: 20px;">
+                <p>Already have an account? <button class="btn-link" onclick="showLoginTab()">Login</button></p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Main App Section -->
+    <section id="appSection" style="display: none;">
+        <div class="user-info">
+            <span>Logged in as: <strong id="userEmail"></strong></span>
+            <button class="btn-logout" onclick="signOut()">Logout</button>
+        </div>
+
+        <!-- Create Group Form -->
+        <div class="form-container">
+            <h3>Create New Group</h3>
+            <div class="form-group">
+                <label for="groupName">Group Name:</label>
+                <div style="display: flex; gap: 10px;">
+                    <input type="text" id="groupName" placeholder="Enter group name">
+                    <button class="btn-create" onclick="createGroup()">Create</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Groups List -->
+        <div class="form-container">
+            <h3>Your Groups</h3>
+            <ul id="groupList" class="group-list">
+                <li class="no-groups">Loading groups...</li>
+            </ul>
+        </div>
+    </section>
+</body>
+</html>
